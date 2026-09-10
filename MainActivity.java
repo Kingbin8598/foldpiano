@@ -13,9 +13,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
 import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 public class MainActivity extends Activity implements SensorEventListener {
 
@@ -24,29 +27,43 @@ public class MainActivity extends Activity implements SensorEventListener {
             523.25, 587.33, 659.26, 698.46, 783.99, 880.00, 987.77, 1046.50
     };
     private static final String[] NAMES = {"도", "레", "미", "파", "솔", "라", "시", "도↑"};
-    private static final double ZONE_DEG = 20.0;  // 20도마다 한 음 (0~160도에 8음)
-    private static final double MARGIN = 3.0;     // 경계에서 떨림 방지
+    private static final int[] COLORS = {
+            0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047,
+            0xFF1E88E5, 0xFF3949AB, 0xFF8E24AA, 0xFFD81B60
+    };
+    private static final double ZONE_DEG = 20.0;
+    private static final double MARGIN = 3.0;
+    private static final long LONG_PRESS_MS = 1000;
 
     private SensorManager sensorManager;
     private Sensor accel;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private short[][] notes;
+    private AudioTrack[] tracks;
 
-    private final float[] g = new float[3];   // 필터된 중력 벡터
-    private float[] g0 = null;                // 기준 자세(0도)
+    private final float[] g = new float[3];
+    private float[] g0 = null;
     private boolean hasSample = false;
     private boolean needCalib = true;
-    private int zone = -1;
+    private int zone = 0;
+    private boolean zoneSet = false;
+    private double angle = 0;
 
+    private LinearLayout root;
     private TextView noteView;
     private TextView infoView;
+
+    private final Runnable longPress = () -> {
+        needCalib = true;
+        root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        Toast.makeText(this, "지금 자세를 0°로 맞췄어요", Toast.LENGTH_SHORT).show();
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
         root.setBackgroundColor(Color.BLACK);
@@ -59,17 +76,33 @@ public class MainActivity extends Activity implements SensorEventListener {
 
         infoView = new TextView(this);
         infoView.setTextSize(18);
-        infoView.setTextColor(Color.GRAY);
+        infoView.setTextColor(Color.LTGRAY);
         infoView.setGravity(Gravity.CENTER);
 
         root.addView(noteView);
         root.addView(infoView);
-        root.setOnClickListener(v -> needCalib = true);
+        root.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    play(zone);
+                    handler.postDelayed(longPress, LONG_PRESS_MS);
+                    return true;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    play(zone);
+                    handler.removeCallbacks(longPress);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    handler.removeCallbacks(longPress);
+                    return true;
+            }
+            return true;
+        });
         setContentView(root);
 
-        notes = new short[FREQS.length][];
+        tracks = new AudioTrack[FREQS.length];
         for (int i = 0; i < FREQS.length; i++) {
-            notes[i] = synth(FREQS[i]);
+            tracks[i] = buildTrack(synth(FREQS[i]));
         }
 
         sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
@@ -92,6 +125,15 @@ public class MainActivity extends Activity implements SensorEventListener {
     protected void onPause() {
         super.onPause();
         sensorManager.unregisterListener(this);
+        handler.removeCallbacks(longPress);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        for (AudioTrack t : tracks) {
+            if (t != null) t.release();
+        }
     }
 
     @Override
@@ -103,13 +145,13 @@ public class MainActivity extends Activity implements SensorEventListener {
             hasSample = true;
         } else {
             for (int i = 0; i < 3; i++) {
-                g[i] += 0.2f * (event.values[i] - g[i]);  // 저역 필터
+                g[i] += 0.2f * (event.values[i] - g[i]);
             }
         }
 
         if (needCalib) {
             g0 = new float[]{g[0], g[1], g[2]};
-            zone = -1;
+            zoneSet = false;
             needCalib = false;
         }
 
@@ -118,26 +160,33 @@ public class MainActivity extends Activity implements SensorEventListener {
         double n0 = Math.sqrt(g0[0] * g0[0] + g0[1] * g0[1] + g0[2] * g0[2]);
         if (n1 < 1e-3 || n0 < 1e-3) return;
         double c = Math.max(-1.0, Math.min(1.0, dot / (n1 * n0)));
-        double angle = Math.toDegrees(Math.acos(c));  // 기준 자세에서 기울어진 각도
+        angle = Math.toDegrees(Math.acos(c));
 
         int newZone = (int) (angle / ZONE_DEG);
         if (newZone > 7) newZone = 7;
 
-        if (zone == -1) {
-            zone = newZone;  // 기준 잡을 땐 소리 없이 위치만 기억
+        if (!zoneSet) {
+            zone = newZone;
+            zoneSet = true;
+            updateNote();
         } else if (newZone != zone) {
             double lower = zone * ZONE_DEG - MARGIN;
             double upper = (zone + 1) * ZONE_DEG + MARGIN;
             if (angle < lower || (angle > upper && zone < 7)) {
                 zone = newZone;
-                play(zone);
+                root.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+                updateNote();
             }
         }
 
+        infoView.setText("각도: 약 " + Math.round(angle) + "°\n\n"
+                + "카메라 면 각도로 음을 고르고\n화면을 탭하면 소리가 나요\n\n"
+                + "길게 누르면 지금 자세가 0°");
+    }
+
+    private void updateNote() {
         noteView.setText(NAMES[zone]);
-        infoView.setText("접은 각도: 약 " + Math.round(angle) + "°\n\n"
-                + "화면 면을 책상에 펼쳐 두고\n카메라 면을 들어 올려 연주하세요\n\n"
-                + "화면을 탭하면 지금 자세가 0°가 돼요");
+        noteView.setTextColor(COLORS[zone]);
     }
 
     @Override
@@ -145,8 +194,23 @@ public class MainActivity extends Activity implements SensorEventListener {
     }
 
     private void play(int idx) {
-        final short[] pcm = notes[idx];
-        final AudioTrack track = new AudioTrack.Builder()
+        AudioTrack t = tracks[idx];
+        if (t == null) return;
+        try {
+            if (t.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                t.stop();
+            }
+            t.reloadStaticData();
+            t.play();
+        } catch (IllegalStateException ignored) {
+        }
+        noteView.setScaleX(1.15f);
+        noteView.setScaleY(1.15f);
+        noteView.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
+    }
+
+    private AudioTrack buildTrack(short[] pcm) {
+        AudioTrack track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -160,8 +224,7 @@ public class MainActivity extends Activity implements SensorEventListener {
                 .setBufferSizeInBytes(pcm.length * 2)
                 .build();
         track.write(pcm, 0, pcm.length);
-        track.play();
-        handler.postDelayed(track::release, 1000);
+        return track;
     }
 
     private short[] synth(double f) {
