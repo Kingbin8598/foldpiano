@@ -1,27 +1,32 @@
-name: Build APK
+package com.songpyun.foldpiano;
 
-on:
-  push:
-  workflow_dispatch:
+import android.app.Activity;
+import android.graphics.Color;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
+import android.view.WindowManager;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.7'
-      - name: Build
-        run: |
-          mkdir -p src
-          cp MainActivity.java src/
-          gradle assembleDebug -Dorg.gradle.jvmargs=-Xmx2g
-      - uses: actions/upload-artifact@v4
-        with:
-          name: foldpiano-apk
-          path: build/outputs/apk/debug/*.apk
+public class MainActivity extends Activity implements SensorEventListener {
+
+    private static final int SR = 44100;
+    private static final double[] FREQS = {
+            523.25, 587.33, 659.26, 698.46, 783.99, 880.00, 987.77, 1046.50
+    };
+    private static final String[] NAMES = {"도", "레", "미", "파", "솔", "라", "시", "도↑"};
+    private static final int[] COLORS = {
+            0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047,
+            0xFF1E88E5, 0xFF3949AB, 0xFF8E24AA, 0xFFD81B60
